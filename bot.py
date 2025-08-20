@@ -166,7 +166,26 @@ async def on_ready():
         else:
             print(f"🔗 Using existing verification message (ID: {MESSAGE_ID})")
 
-    # Start counting bot loop
+    # --- Counting channel startup ---
+    global last_number
+    counting_channel = bot.get_channel(COUNTING_CHANNEL_ID)
+    if counting_channel:
+        last_msg = None
+        async for m in counting_channel.history(limit=100, oldest_first=False):
+            if m.author.bot is False and m.content.isdigit():
+                last_msg = m
+                break
+
+        if last_msg:
+            last_number = int(last_msg.content)
+            print(f"🔢 Continuing counting at {last_number + 1}")
+        else:
+            last_number = 1
+            await counting_channel.send(str(last_number))
+            print("🔢 Started counting with 1")
+        save_count()
+
+    # Start random counting loop
     send_random_number.start()
 
 # --- Reaction role ---
@@ -191,14 +210,12 @@ async def on_message(message):
         return
 
     if message.channel.id == COUNTING_CHANNEL_ID:
-        # Only digits allowed
         if not message.content.isdigit():
             await message.delete()
             return
 
         number = int(message.content)
 
-        # Fetch last valid number in the channel
         last_msg = None
         async for m in message.channel.history(limit=50, oldest_first=False):
             if m.author.bot is False and m.content.isdigit():
@@ -211,7 +228,6 @@ async def on_message(message):
             await message.delete()
             return
 
-        # Update last_number
         global last_number
         last_number = number
         save_count()
