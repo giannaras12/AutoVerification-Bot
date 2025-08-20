@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from discord.ui import View, Button, Select
+from discord.ui import View, Select
 import os
 import json
 import random
@@ -9,47 +9,45 @@ import datetime
 from flask import Flask
 from threading import Thread
 
-# ---------------- CONFIG ----------------
+# --- CONFIG ---
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # verification channel
-ROLE_ID = int(os.getenv("ROLE_ID"))        # verification role
-COUNTING_CHANNEL_ID = int(os.getenv("COUNTING_CHANNEL_ID"))  # counting channel
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))  # timeout logs
-
-MODERATOR_ROLES = [1407804031547474061, 1407804295763595324, 1407805292586078257]  # moderator roles
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))            # Verification channel
+ROLE_ID = int(os.getenv("ROLE_ID"))                  # Role given on verification
+COUNTING_CHANNEL_ID = int(os.getenv("COUNTING_CHANNEL_ID"))  # Counting channel
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))    # Timeout log channel
+MODERATOR_ROLES = [1407804031547474061, 1407804295763595324, 1407805292586078257]
 
 MESSAGE_FILE = "verification.json"
 COUNT_FILE = "counting.json"
 
-# ---------------- INTENTS ----------------
 intents = discord.Intents.default()
-intents.members = True
 intents.reactions = True
+intents.members = True
 intents.messages = True
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------- GLOBALS ----------------
-MESSAGE_ID = None
-last_number = 0
-
-# ---------------- LOAD FILES ----------------
+# --- Load verification message ---
 if os.path.exists(MESSAGE_FILE):
     with open(MESSAGE_FILE, "r") as f:
         data = json.load(f)
         MESSAGE_ID = data.get("message_id", None)
+else:
+    MESSAGE_ID = None
 
+# --- Load last counting number ---
 if os.path.exists(COUNT_FILE):
     with open(COUNT_FILE, "r") as f:
         data = json.load(f)
         last_number = data.get("last_number", 0)
+else:
+    last_number = 0
 
 def save_count():
     with open(COUNT_FILE, "w") as f:
         json.dump({"last_number": last_number}, f)
 
-# ---------------- VERIFICATION ----------------
+# --- Verification embed ---
 def create_verification_embed():
     embed = discord.Embed(
         title="✅ Verification",
@@ -59,12 +57,13 @@ def create_verification_embed():
     embed.set_footer(text="Welcome to the community!")
     return embed
 
+# --- Bot ready event ---
 @bot.event
 async def on_ready():
+    global MESSAGE_ID, last_number
     print(f"✅ Logged in as {bot.user}")
 
-    # Send verification message if not exists
-    global MESSAGE_ID
+    # Verification message
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
         if MESSAGE_ID is None:
@@ -74,20 +73,30 @@ async def on_ready():
             with open(MESSAGE_FILE, "w") as f:
                 json.dump({"message_id": MESSAGE_ID}, f)
             print(f"📌 Verification message sent (ID: {MESSAGE_ID})")
-        else:
-            print(f"🔗 Using existing verification message (ID: {MESSAGE_ID})")
 
-    # Start random number task
+    # Counting channel: fetch last number
+    count_channel = bot.get_channel(COUNTING_CHANNEL_ID)
+    if count_channel:
+        async for m in count_channel.history(limit=50, oldest_first=False):
+            if m.content.isdigit():
+                last_number = int(m.content)
+                break
+        else:
+            # Empty channel → send 1
+            last_number = 1
+            await count_channel.send("1")
+            save_count()
+
     send_random_number.start()
 
-    # Sync context menu commands
+    # Sync commands for timeout
     try:
         await bot.tree.sync()
         print("✅ Synced application commands.")
     except Exception as e:
         print(f"⚠️ Failed to sync commands: {e}")
 
-# ---------------- ROLE ON REACTION ----------------
+# --- Verification role ---
 @bot.event
 async def on_raw_reaction_add(payload):
     if payload.message_id == MESSAGE_ID and str(payload.emoji) == "✅":
@@ -102,41 +111,27 @@ async def on_raw_reaction_add(payload):
                 except discord.Forbidden:
                     print("⚠️ Missing permissions to add role.")
 
-# ---------------- COUNTING ----------------
+# --- Counting channel logic ---
 @bot.event
 async def on_message(message):
     global last_number
     if message.author.bot:
         return
 
-    # Counting channel
     if message.channel.id == COUNTING_CHANNEL_ID:
         if not message.content.isdigit():
             try:
                 await message.delete()
-            except discord.NotFound:
+            except:
                 pass
             return
 
         number = int(message.content)
 
-        # Find last number in channel (bot or user)
-        last_msg = None
-        async for m in message.channel.history(limit=50, oldest_first=False):
-            if m.content.isdigit():
-                last_msg = m
-                break
-
-        last_number_local = int(last_msg.content) if last_msg else 0
-
-        # Special case: empty channel, allow 1
-        if last_number_local == 0 and number == 1:
-            last_number_local = 0
-
-        if number != last_number_local + 1:
+        if number != last_number + 1:
             try:
                 await message.delete()
-            except discord.NotFound:
+            except:
                 pass
             return
 
@@ -145,96 +140,72 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ---------------- RANDOM COUNT ----------------
+# --- Random number every 24–48h ---
 @tasks.loop(hours=24)
 async def send_random_number():
     global last_number
-    await asyncio.sleep(random.randint(0, 24*60*60))  # extra 0–24h delay
+    await asyncio.sleep(random.randint(0, 24*60*60))  # Random delay 0–24h
     channel = bot.get_channel(COUNTING_CHANNEL_ID)
     if channel:
         last_number += 1
         await channel.send(str(last_number))
         save_count()
 
-# ---------------- TIMEOUT ----------------
-class TimeoutView(View):
-    def __init__(self, target_message, moderator):
-        super().__init__(timeout=60)
-        self.target_message = target_message
-        self.moderator = moderator
-
-    @discord.ui.button(label="✅ Yes", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Choose timeout duration:", view=DurationView(self.target_message, self.moderator), ephemeral=True)
-        self.stop()
-
-    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("❌ Timeout cancelled.", ephemeral=True)
-        self.stop()
-
-class DurationView(View):
-    def __init__(self, target_message, moderator):
-        super().__init__(timeout=60)
-        self.target_message = target_message
-        self.moderator = moderator
-
-        options = [
-            discord.SelectOption(label="15 minutes", value="900"),
-            discord.SelectOption(label="1 hour", value="3600"),
-            discord.SelectOption(label="3 hours", value="10800"),
-            discord.SelectOption(label="6 hours", value="21600"),
-            discord.SelectOption(label="1 day", value="86400"),
-        ]
-        self.add_item(Select(placeholder="Select duration", options=options, custom_id="duration_select"))
-
-    @discord.ui.select(custom_id="duration_select")
-    async def select_duration(self, interaction: discord.Interaction, select: discord.ui.Select):
-        duration_seconds = int(select.values[0])
-        duration = datetime.timedelta(seconds=duration_seconds)
-
-        member = self.target_message.author
-        try:
-            await member.timeout(duration, reason=f"Timeout by {self.moderator}")
-        except discord.Forbidden:
-            await interaction.response.send_message("⚠️ Missing permissions to timeout this user.", ephemeral=True)
-            return
-
-        # Log
-        log_channel = interaction.client.get_channel(LOG_CHANNEL_ID)
-        if log_channel:
-            messages = [m async for m in self.target_message.channel.history(limit=20) if m.author.id == member.id]
-            last_5 = "\n".join([f"- {m.content}" for m in messages[:5]])
-
-            embed = discord.Embed(
-                title="🚨 Timeout Applied",
-                color=discord.Color.red(),
-                timestamp=datetime.datetime.utcnow()
-            )
-            embed.add_field(name="Moderator", value=self.moderator.mention, inline=True)
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Duration", value=str(duration), inline=True)
-            embed.add_field(name="Channel", value=self.target_message.channel.mention, inline=False)
-            embed.add_field(name="Message", value=self.target_message.content or "*[No content]*", inline=False)
-            embed.add_field(name="Last 5 Messages", value=last_5 or "No history", inline=False)
-            await log_channel.send(embed=embed)
-
-        await interaction.response.send_message(f"✅ {member.mention} has been timed out for {duration}.", ephemeral=True)
-
-# Context menu
+# --- Timeout via context menu ---
 @bot.tree.context_menu(name="Timeout")
 async def timeout_message(interaction: discord.Interaction, message: discord.Message):
     if not any(r.id in MODERATOR_ROLES for r in interaction.user.roles):
         await interaction.response.send_message("❌ You don’t have permission to use this.", ephemeral=True)
         return
 
-    await interaction.response.send_message(
-        f"Are you sure you want to timeout {message.author.mention}?",
-        view=TimeoutView(message, interaction.user),
-        ephemeral=True
-    )
+    options = [
+        discord.SelectOption(label="15 minutes", value="900"),
+        discord.SelectOption(label="1 hour", value="3600"),
+        discord.SelectOption(label="3 hours", value="10800"),
+        discord.SelectOption(label="6 hours", value="21600"),
+        discord.SelectOption(label="1 day", value="86400"),
+    ]
 
-# ---------------- KEEP-ALIVE ----------------
+    class DurationSelectView(View):
+        def __init__(self):
+            super().__init__(timeout=60)
+            self.add_item(Select(placeholder="Select timeout duration", options=options))
+
+        @discord.ui.select()
+        async def select_callback(self, interaction2: discord.Interaction, select: discord.ui.Select):
+            duration_seconds = int(select.values[0])
+            duration = datetime.timedelta(seconds=duration_seconds)
+            member = message.author
+            try:
+                await member.timeout(duration, reason=f"Timeout by {interaction.user}")
+            except discord.Forbidden:
+                await interaction2.response.send_message("⚠️ Missing permissions to timeout this user.", ephemeral=True)
+                return
+
+            # Log embed
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                messages = [m async for m in message.channel.history(limit=20) if m.author.id == member.id]
+                last_5 = "\n".join([f"- {m.content}" for m in messages[:5]])
+                embed = discord.Embed(
+                    title="🚨 Timeout Applied",
+                    color=discord.Color.red(),
+                    timestamp=datetime.datetime.utcnow()
+                )
+                embed.add_field(name="Moderator", value=interaction.user.mention)
+                embed.add_field(name="User", value=member.mention)
+                embed.add_field(name="Duration", value=str(duration))
+                embed.add_field(name="Channel", value=message.channel.mention)
+                embed.add_field(name="Message", value=message.content or "*[No content]*")
+                embed.add_field(name="Last 5 Messages", value=last_5 or "No history")
+                await log_channel.send(embed=embed)
+
+            await interaction2.response.send_message(f"✅ {member.mention} timed out for {duration}.", ephemeral=True)
+            self.stop()
+
+    await interaction.response.send_message("Select timeout duration:", view=DurationSelectView(), ephemeral=True)
+
+# --- Keep-alive server for UptimeRobot ---
 app = Flask("")
 
 @app.route("/")
