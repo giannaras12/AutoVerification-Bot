@@ -1,20 +1,16 @@
 import discord
 from discord.ext import commands, tasks
 from discord.ui import View, Button, Select
-import os
-import json
-import random
-import asyncio
-import datetime
+import os, json, random, asyncio, datetime
 from flask import Flask
 from threading import Thread
 
 # --- CONFIG ---
 TOKEN = os.getenv("DISCORD_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))            # Verification channel
-ROLE_ID = int(os.getenv("ROLE_ID"))                  # Role to give on verification
-COUNTING_CHANNEL_ID = int(os.getenv("COUNTING_CHANNEL_ID"))  # Counting channel
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))    # Log channel for moderation
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  # Verification channel
+ROLE_ID = int(os.getenv("ROLE_ID"))        # Role to give
+COUNTING_CHANNEL_ID = int(os.getenv("COUNTING_CHANNEL_ID"))
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))
 MODERATOR_ROLES = [1407804031547474061, 1407804295763595324, 1407805292586078257]
 
 MESSAGE_FILE = "verification.json"
@@ -36,7 +32,7 @@ if os.path.exists(MESSAGE_FILE):
 else:
     MESSAGE_ID = None
 
-# --- Load counting progress ---
+# --- Load last number (optional persistence) ---
 if os.path.exists(COUNT_FILE):
     with open(COUNT_FILE, "r") as f:
         data = json.load(f)
@@ -44,8 +40,8 @@ if os.path.exists(COUNT_FILE):
 else:
     last_number = 0
 
-# --- Save last number ---
 def save_count():
+    global last_number
     with open(COUNT_FILE, "w") as f:
         json.dump({"last_number": last_number}, f)
 
@@ -59,7 +55,7 @@ def create_verification_embed():
     embed.set_footer(text="Welcome to the community!")
     return embed
 
-# --- Timeout Views for moderation ---
+# --- Timeout Views ---
 class TimeoutView(View):
     def __init__(self, target_message, moderator):
         super().__init__(timeout=60)
@@ -71,7 +67,11 @@ class TimeoutView(View):
 
     @discord.ui.button(label="✅ Yes", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("Choose timeout duration:", view=DurationView(self.target_message, self.moderator), ephemeral=True)
+        await interaction.response.send_message(
+            "Choose timeout duration:", 
+            view=DurationView(self.target_message, self.moderator), 
+            ephemeral=True
+        )
         self.stop()
 
     @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
@@ -84,7 +84,6 @@ class DurationView(View):
         super().__init__(timeout=60)
         self.target_message = target_message
         self.moderator = moderator
-
         options = [
             discord.SelectOption(label="15 minutes", value="900"),
             discord.SelectOption(label="1 hour", value="3600"),
@@ -126,11 +125,11 @@ class DurationView(View):
             await log_channel.send(embed=embed)
 
         await interaction.response.send_message(f"✅ {member.mention} has been timed out for {duration}.", ephemeral=True)
+        self.stop()
 
-# --- Context Menu Command ---
+# --- Context Menu ---
 @bot.tree.context_menu(name="Timeout")
 async def timeout_message(interaction: discord.Interaction, message: discord.Message):
-    # Check moderator role
     if not any(r.id in MODERATOR_ROLES for r in interaction.user.roles):
         await interaction.response.send_message("❌ You don’t have permission to use this.", ephemeral=True)
         return
@@ -146,7 +145,7 @@ async def timeout_message(interaction: discord.Interaction, message: discord.Mes
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
 
-    # Sync context menu commands
+    # Sync commands
     try:
         await bot.tree.sync()
         print("✅ Synced application commands.")
@@ -188,38 +187,49 @@ async def on_raw_reaction_add(payload):
 # --- Counting channel ---
 @bot.event
 async def on_message(message):
-    global last_number
     if message.author.bot:
         return
 
-    # Counting channel logic
     if message.channel.id == COUNTING_CHANNEL_ID:
+        # Only digits allowed
         if not message.content.isdigit():
             await message.delete()
             return
 
         number = int(message.content)
-        if number != last_number + 1:
+
+        # Fetch last valid number in the channel
+        last_msg = None
+        async for m in message.channel.history(limit=50, oldest_first=False):
+            if m.author.bot is False and m.content.isdigit():
+                last_msg = m
+                break
+
+        last_number_local = int(last_msg.content) if last_msg else 0
+
+        if number != last_number_local + 1:
             await message.delete()
             return
 
+        # Update last_number
+        global last_number
         last_number = number
         save_count()
 
     await bot.process_commands(message)
 
-# --- Random counting by bot ---
+# --- Random counting ---
 @tasks.loop(hours=24)
 async def send_random_number():
-    global last_number
     await asyncio.sleep(random.randint(0, 24*60*60))
     channel = bot.get_channel(COUNTING_CHANNEL_ID)
     if channel:
+        global last_number
         last_number += 1
         await channel.send(str(last_number))
         save_count()
 
-# --- Keep Alive ---
+# --- Keep alive ---
 app = Flask("")
 
 @app.route("/")
