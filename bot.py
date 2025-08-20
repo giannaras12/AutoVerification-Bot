@@ -1,32 +1,81 @@
 import discord
 from discord.ext import commands, tasks
+from discord.ui import View, Button, Select
 import os
 import json
 import random
 import asyncio
+import datetime
+from flask import Flask
+from threading import Thread
 
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))  
-MODERATOR_ROLES = [1407804031547474061, 1407804295763595324, 1407805292586078257]  # replace with real role IDs
+# --- CONFIG ---
+TOKEN = os.getenv("DISCORD_TOKEN")
+CHANNEL_ID = int(os.getenv("CHANNEL_ID"))            # Verification channel
+ROLE_ID = int(os.getenv("ROLE_ID"))                  # Role to give on verification
+COUNTING_CHANNEL_ID = int(os.getenv("COUNTING_CHANNEL_ID"))  # Counting channel
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID"))    # Log channel for moderation
+MODERATOR_ROLES = [1407804031547474061, 1407804295763595324, 1407805292586078257]
 
+MESSAGE_FILE = "verification.json"
+COUNT_FILE = "counting.json"
+
+# --- INTENTS AND BOT ---
+intents = discord.Intents.default()
+intents.reactions = True
+intents.members = True
+intents.messages = True
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# --- Load verification message ---
+if os.path.exists(MESSAGE_FILE):
+    with open(MESSAGE_FILE, "r") as f:
+        data = json.load(f)
+        MESSAGE_ID = data.get("message_id", None)
+else:
+    MESSAGE_ID = None
+
+# --- Load counting progress ---
+if os.path.exists(COUNT_FILE):
+    with open(COUNT_FILE, "r") as f:
+        data = json.load(f)
+        last_number = data.get("last_number", 0)
+else:
+    last_number = 0
+
+# --- Save last number ---
+def save_count():
+    with open(COUNT_FILE, "w") as f:
+        json.dump({"last_number": last_number}, f)
+
+# --- Verification Embed ---
+def create_verification_embed():
+    embed = discord.Embed(
+        title="✅ Verification",
+        description="By reacting to this message with the ✅ emoji you confirm that you have **read** and will **respect** the community rules.",
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="Welcome to the community!")
+    return embed
+
+# --- Timeout Views for moderation ---
 class TimeoutView(View):
     def __init__(self, target_message, moderator):
         super().__init__(timeout=60)
         self.target_message = target_message
         self.moderator = moderator
 
-        self.add_item(Button(label="✅ Yes", style=discord.ButtonStyle.danger, custom_id="confirm"))
-        self.add_item(Button(label="❌ Cancel", style=discord.ButtonStyle.secondary, custom_id="cancel"))
-
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user == self.moderator
 
     @discord.ui.button(label="✅ Yes", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("Choose timeout duration:", view=DurationView(self.target_message, self.moderator), ephemeral=True)
         self.stop()
 
     @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cancel(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_message("❌ Timeout cancelled.", ephemeral=True)
         self.stop()
 
@@ -46,11 +95,11 @@ class DurationView(View):
         self.add_item(Select(placeholder="Select duration", options=options, custom_id="duration_select"))
 
     @discord.ui.select(custom_id="duration_select")
-    async def select_duration(self, interaction: discord.Interaction, select: discord.ui.Select):
+    async def select_duration(self, interaction: discord.Interaction, select: Select):
         duration_seconds = int(select.values[0])
         duration = datetime.timedelta(seconds=duration_seconds)
-
         member = self.target_message.author
+
         try:
             await member.timeout_for(duration, reason=f"Timeout by {self.moderator}")
         except discord.Forbidden:
@@ -92,67 +141,23 @@ async def timeout_message(interaction: discord.Interaction, message: discord.Mes
         ephemeral=True
     )
 
-# --- Sync commands on ready ---
+# --- Events ---
 @bot.event
 async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+
+    # Sync context menu commands
     try:
         await bot.tree.sync()
         print("✅ Synced application commands.")
     except Exception as e:
         print(f"⚠️ Failed to sync commands: {e}")
-        
-TOKEN = os.getenv("DISCORD_TOKEN")  
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))  
-ROLE_ID = int(os.getenv("ROLE_ID"))  
-COUNTING_CHANNEL_ID = int(os.getenv("COUNTING_CHANNEL_ID"))  # 👈 set this in Render
-MESSAGE_FILE = "verification.json"
-COUNT_FILE = "counting.json"
 
-intents = discord.Intents.default()
-intents.reactions = True
-intents.members = True
-intents.messages = True
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# --- Load verification message ---
-if os.path.exists(MESSAGE_FILE):
-    with open(MESSAGE_FILE, "r") as f:
-        data = json.load(f)
-        MESSAGE_ID = data.get("message_id", None)
-else:
-    MESSAGE_ID = None
-
-# --- Load counting progress ---
-if os.path.exists(COUNT_FILE):
-    with open(COUNT_FILE, "r") as f:
-        data = json.load(f)
-        last_number = data.get("last_number", 0)
-else:
-    last_number = 0
-
-# --- Save last number ---
-def save_count():
-    with open(COUNT_FILE, "w") as f:
-        json.dump({"last_number": last_number}, f)
-
-# --- Verification Embed ---
-def create_verification_embed():
-    embed = discord.Embed(
-        title="✅ Verification",
-        description="By reacting to this message with the ✅ emoji you confirm that you have **read** and will **respect** the community rules.",
-        color=discord.Color.green()
-    )
-    embed.set_footer(text="Welcome to the community!")
-    return embed
-
-@bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
+    # Verification message
     global MESSAGE_ID
     channel = bot.get_channel(CHANNEL_ID)
     if channel:
-        if MESSAGE_ID is None:  
+        if MESSAGE_ID is None:
             msg = await channel.send(embed=create_verification_embed())
             await msg.add_reaction("✅")
             MESSAGE_ID = msg.id
@@ -162,10 +167,10 @@ async def on_ready():
         else:
             print(f"🔗 Using existing verification message (ID: {MESSAGE_ID})")
 
-    # Start background task for random counting
+    # Start counting bot loop
     send_random_number.start()
 
-# --- Role assignment ---
+# --- Reaction role ---
 @bot.event
 async def on_raw_reaction_add(payload):
     if payload.message_id == MESSAGE_ID and str(payload.emoji) == "✅":
@@ -180,38 +185,34 @@ async def on_raw_reaction_add(payload):
                 except discord.Forbidden:
                     print("⚠️ Missing permissions to add role.")
 
-# --- Counting game ---
+# --- Counting channel ---
 @bot.event
 async def on_message(message):
     global last_number
     if message.author.bot:
         return
 
-    # Only enforce rules in counting channel
+    # Counting channel logic
     if message.channel.id == COUNTING_CHANNEL_ID:
         if not message.content.isdigit():
             await message.delete()
             return
 
         number = int(message.content)
-
-        # Check if number is correct sequence
         if number != last_number + 1:
             await message.delete()
             return
 
-        # Valid number → accept it
         last_number = number
         save_count()
 
-    # Allow commands & other bot processing
     await bot.process_commands(message)
 
-# --- Random bot counting ---
+# --- Random counting by bot ---
 @tasks.loop(hours=24)
 async def send_random_number():
     global last_number
-    await asyncio.sleep(random.randint(0, 24*60*60))  # add random 0–24h extra delay
+    await asyncio.sleep(random.randint(0, 24*60*60))
     channel = bot.get_channel(COUNTING_CHANNEL_ID)
     if channel:
         last_number += 1
@@ -219,9 +220,6 @@ async def send_random_number():
         save_count()
 
 # --- Keep Alive ---
-from flask import Flask
-from threading import Thread
-
 app = Flask("")
 
 @app.route("/")
@@ -237,4 +235,3 @@ def keep_alive():
 
 keep_alive()
 bot.run(TOKEN)
-
