@@ -183,6 +183,13 @@ async def timeout_message(interaction: discord.Interaction, message: discord.Mes
             duration_seconds = int(self.select.values[0])
             duration = datetime.timedelta(seconds=duration_seconds)
             member = message.author
+
+            # Delete the message being timed out
+            try:
+                await message.delete()
+            except discord.Forbidden:
+                pass  # Bot might not have permission
+
             try:
                 await member.timeout(duration, reason=f"Timeout by {interaction.user}")
             except discord.Forbidden:
