@@ -74,18 +74,20 @@ async def on_ready():
                 json.dump({"message_id": MESSAGE_ID}, f)
             print(f"📌 Verification message sent (ID: {MESSAGE_ID})")
 
-    # Counting channel: fetch last number
+    # Counting channel: fetch last number robustly
     count_channel = bot.get_channel(COUNTING_CHANNEL_ID)
     if count_channel:
-        async for m in count_channel.history(limit=50, oldest_first=False):
+        last_number_found = False
+        async for m in count_channel.history(limit=None, oldest_first=False):
             if m.content.isdigit():
                 last_number = int(m.content)
+                last_number_found = True
                 break
-        else:
-            # Empty channel → send 1
+        if not last_number_found:
+            # Empty or no numeric message → send 1
             last_number = 1
             await count_channel.send("1")
-            save_count()
+        save_count()
 
     send_random_number.start()
 
@@ -128,6 +130,10 @@ async def on_message(message):
 
         number = int(message.content)
 
+        # FIXED: Ensure last_number is initialized correctly
+        if last_number == 0:
+            last_number = number - 1
+
         if number != last_number + 1:
             try:
                 await message.delete()
@@ -169,11 +175,12 @@ async def timeout_message(interaction: discord.Interaction, message: discord.Mes
     class DurationSelectView(View):
         def __init__(self):
             super().__init__(timeout=60)
-            self.add_item(Select(placeholder="Select timeout duration", options=options))
+            self.select = Select(placeholder="Select timeout duration", options=options)
+            self.select.callback = self.select_callback
+            self.add_item(self.select)
 
-        @discord.ui.select()
-        async def select_callback(self, interaction2: discord.Interaction, select: discord.ui.Select):
-            duration_seconds = int(select.values[0])
+        async def select_callback(self, interaction2: discord.Interaction):
+            duration_seconds = int(self.select.values[0])
             duration = datetime.timedelta(seconds=duration_seconds)
             member = message.author
             try:
